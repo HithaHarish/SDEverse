@@ -3,7 +3,13 @@ const User = require("../models/user.model");
 const OTP = require("../models/otp.model");
 const generateToken = require("../utils/generateToken");
 const sendEmail = require("../config/sendEmail");
+const { OAuth2Client } = require("google-auth-library");
+const jwt = require("jsonwebtoken");
 
+// Google OAuth client
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+// ---------------- Validation Helpers ----------------
 const validateEmail = (email) => {
   if (typeof email !== "string") return false;
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -26,119 +32,116 @@ const validatePassword = (password) => {
   );
 };
 
-// Added: Sanitize input to prevent NoSQL injection and XSS
 const sanitizeInput = (input) => {
   if (typeof input !== "string") return "";
   return input.trim().replace(/^\$/, "");
 };
 
+// ---------------- Google OAuth ----------------
+const googleAuth = asyncHandler(async (req, res) => {
+  try {
+    const { token } = req.body;
+    const ticket = await client.verifyIdToken({
+      idToken: token,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
+    const { email, name, picture } = ticket.getPayload();
+
+    let user = await User.findOne({ email });
+    if (!user) {
+      user = await User.create({
+        username: name,
+        email,
+        password: "",
+        profilePic: picture,
+      });
+    }
+
+    const jwtToken = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
+      expiresIn: "7d",
+    });
+
+    res.json({ success: true, token: jwtToken, user });
+  } catch (err) {
+    console.error(err);
+    res.status(400).json({ success: false, message: "Google login failed" });
+  }
+});
+
+// ---------------- Register ----------------
 const registerUser = asyncHandler(async (req, res) => {
   const { username, email, password } = req.body;
 
   if (!username || !email || !password) {
     res.status(400);
-    throw new Error("Please provide all required fields: username, email, and password");
+    throw new Error("Please provide all required fields");
   }
 
-  // Added: Sanitize inputs to prevent injection attacks
   const sanitizedUsername = sanitizeInput(username);
   const sanitizedEmail = sanitizeInput(email);
 
-  // Added: Validate username format
-  if (!validateUsername(sanitizedUsername)) {
-    res.status(400);
-    throw new Error("Username must be 3-20 characters and contain only letters, numbers, and underscores");
-  }
+  if (!validateUsername(sanitizedUsername))
+    throw new Error("Invalid username format");
 
-  // Added: Validate email format
-  if (!validateEmail(sanitizedEmail)) {
-    res.status(400);
-    throw new Error("Please provide a valid email address");
-  }
+  if (!validateEmail(sanitizedEmail))
+    throw new Error("Invalid email address");
 
-  if (!validatePassword(password)) {
-    res.status(400);
-    throw new Error("Password must be at least 6 characters and contain at least one letter and one number");
-  }
+  if (!validatePassword(password))
+    throw new Error("Weak password");
 
-  // Added: Check for duplicate username as well as email
   const [emailExists, usernameExists] = await Promise.all([
     User.findOne({ email: sanitizedEmail.toLowerCase() }),
     User.findOne({ username: sanitizedUsername }),
   ]);
 
-  if (emailExists) {
-    res.status(400);
-    throw new Error("Email already registered");
-  }
-
-  if (usernameExists) {
-    res.status(400);
-    throw new Error("Username already taken");
-  }
+  if (emailExists) throw new Error("Email already registered");
+  if (usernameExists) throw new Error("Username already taken");
 
   const user = await User.create({
     username: sanitizedUsername,
-    email: sanitizedEmail.toLowerCase(), 
-    password, 
+    email: sanitizedEmail.toLowerCase(),
+    password,
   });
 
-  if (user) {
-    const userObj = user.toObject();
-    delete userObj.password;
+  const userObj = user.toObject();
+  delete userObj.password;
 
-    res.status(201).json({
-      ...userObj,
-      token: generateToken(user._id),
-    });
-  } else {
-    res.status(400);
-    throw new Error("Invalid user data");
-  }
+  res.status(201).json({
+    ...userObj,
+    token: generateToken(user._id),
+  });
 });
 
+// ---------------- Login ----------------
 const loginUser = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
 
-  if (!email || !password) {
-    res.status(400);
+  if (!email || !password)
     throw new Error("Please provide email and password");
-  }
-
-  // Added: Validate input types to prevent injection
-  if (typeof email !== "string" || typeof password !== "string") {
-    res.status(400);
-    throw new Error("Invalid input format");
-  }
 
   const sanitizedEmail = sanitizeInput(email);
 
-  if (!validateEmail(sanitizedEmail)) {
-    res.status(400);
-    throw new Error("Please provide a valid email address");
-  }
+  if (!validateEmail(sanitizedEmail))
+    throw new Error("Invalid email address");
 
-  
   const user = await User.findOne({ email: sanitizedEmail.toLowerCase() });
 
   if (user && (await user.matchPassword(password))) {
     const userObj = user.toObject();
     delete userObj.password;
-
-    res.json({
-      ...userObj,
-      token: generateToken(user._id),
-    });
+    res.json({ ...userObj, token: generateToken(user._id) });
   } else {
     res.status(401);
     throw new Error("Invalid email or password");
   }
 });
 
+// ---------------- Get Current User ----------------
 const getMe = asyncHandler(async (req, res) => {
   if (!req.user) {
     res.status(401);
-    throw new Error("Not authorized, user not found");
+    throw new Error("Not authorized");
   }
 
   const user = req.user.toObject();
@@ -147,111 +150,74 @@ const getMe = asyncHandler(async (req, res) => {
   res.status(200).json(user);
 });
 
+// ---------------- Forgot Password ----------------
 const forgotPassword = asyncHandler(async (req, res) => {
   const { email } = req.body;
-  
-  if (!email) {
-    res.status(400);
-    throw new Error("Please provide an email address");
-  }
+  if (!email) throw new Error("Please provide an email");
 
   const sanitizedEmail = sanitizeInput(email);
 
-  if (!validateEmail(sanitizedEmail)) {
-    res.status(400);
-    throw new Error("Please provide a valid email address");
-  }
+  if (!validateEmail(sanitizedEmail))
+    throw new Error("Invalid email address");
 
   const user = await User.findOne({ email: sanitizedEmail.toLowerCase() });
 
   if (!user) {
-    res.status(200).json({ 
-      message: "If an account exists with this email, an OTP has been sent",
-      success: true 
-    });
+    res.status(200).json({ message: "If account exists, OTP sent", success: true });
     return;
   }
 
   const otpCode = Math.floor(100000 + Math.random() * 999999);
+  await OTP.create({ email: sanitizedEmail.toLowerCase(), code: otpCode });
 
-  const newOtp = new OTP({
-    email: sanitizedEmail.toLowerCase(),
-    code: otpCode,
-  });
+  await sendEmail(
+    sanitizedEmail,
+    "Password Reset OTP",
+    `Your OTP code is ${otpCode}. Valid for 5 minutes.`
+  );
 
-  await newOtp.save();
-
-  const message = `Your OTP code for password reset is: ${otpCode}. It will expire in 5 minutes.`;
-  await sendEmail(sanitizedEmail, "Password Reset OTP", message);
-
-  res.status(200).json({ 
-    message: "OTP sent to email successfully",
-    success: true 
-  });
+  res.status(200).json({ message: "OTP sent", success: true });
 });
 
+// ---------------- Validate OTP ----------------
 const validateOTP = asyncHandler(async (req, res) => {
   const { email, code } = req.body;
 
   const sanitizedEmail = sanitizeInput(email);
   const otpRecord = await OTP.findOne({ email: sanitizedEmail, code: Number(code) });
-    
-  if (!otpRecord || Date.now() > otpRecord.createdAt.getTime() + 5 * 60 * 1000) {
-    res.status(400);
-    throw new Error("Invalid or expired OTP");
-  }
 
-  res.status(200).json({
-    message: "OTP validated successfully",
-    success: true
-  });
+  if (!otpRecord || Date.now() > otpRecord.createdAt.getTime() + 5 * 60 * 1000)
+    throw new Error("Invalid or expired OTP");
+
+  res.status(200).json({ message: "OTP validated", success: true });
 });
 
+// ---------------- Reset Password ----------------
 const resetPassword = asyncHandler(async (req, res) => {
   const { email, code, newPassword, confirmPassword } = req.body;
 
-  // Validate all fields are provided
-  if (!newPassword || !confirmPassword) {
-    res.status(400);
-    throw new Error("New password, and confirm password");
-  }
+  if (!newPassword || !confirmPassword)
+    throw new Error("Provide both passwords");
 
-  sanitizedEmail = sanitizeInput(email);
+  const sanitizedEmail = sanitizeInput(email);
   const otpRecord = await OTP.findOne({ email: sanitizedEmail, code: Number(code) });
-    
-  if (!otpRecord || Date.now() > otpRecord.createdAt.getTime() + 5 * 60 * 1000) {
-    res.status(400);
+
+  if (!otpRecord || Date.now() > otpRecord.createdAt.getTime() + 5 * 60 * 1000)
     throw new Error("Invalid or expired OTP");
-  }
 
-  // Check if passwords match
-  if (newPassword !== confirmPassword) {
-    res.status(400);
+  if (newPassword !== confirmPassword)
     throw new Error("Passwords do not match");
-  }
 
-  // Validate new password strength
-  if (!validatePassword(newPassword)) {
-    res.status(400);
-    throw new Error("New password must be at least 6 characters and contain at least one letter and one number");
-  }
+  if (!validatePassword(newPassword))
+    throw new Error("Weak password");
 
-  // Find user by email
   const user = await User.findOne({ email: sanitizedEmail.toLowerCase() });
+  if (!user) throw new Error("User not found");
 
-  if (!user) {
-    res.status(404);
-    throw new Error("User not found with this email");
-  }
-
-  // Update password (will be hashed by the pre-save hook in user model)
   user.password = newPassword;
   await user.save();
 
-  res.status(200).json({ 
-    message: "Password reset successfully",
-    success: true 
-  });
+  res.status(200).json({ message: "Password reset successfully", success: true });
 });
 
 module.exports = {
@@ -261,4 +227,5 @@ module.exports = {
   forgotPassword,
   validateOTP,
   resetPassword,
+  googleAuth,
 };

@@ -3,6 +3,7 @@ const dotenv = require("dotenv");
 const cors = require("cors");
 const connectDB = require("./config/db");
 const KeepAlive = require("./utils/keepAlive");
+
 const algorithmRoutes = require("./routes/algorithm.routes");
 const authRoutes = require("./routes/auth.routes");
 const userRoutes = require("./routes/user.routes");
@@ -13,7 +14,7 @@ const feedbackRoutes = require("./routes/feedback.routes");
 const communityRoutes = require("./routes/community.routes");
 const dataStructureRoutes = require("./routes/dataStructure.routes");
 const dataStructureProposalRoutes = require("./routes/dataStructureProposal.routes");
-const contactRoutes = require("./routes/contact.routes")
+const contactRoutes = require("./routes/contact.routes");
 
 const { notFound, errorHandler } = require("./middleware/error.middleware");
 
@@ -21,7 +22,16 @@ dotenv.config();
 connectDB();
 
 const app = express();
-app.use(cors());
+
+// ✅ FIX: specific allowed origin for frontend
+app.use(
+  cors({
+    origin: ["http://localhost:5173"],
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true,
+  })
+);
+
 app.use(express.json({ limit: "10mb" }));
 
 app.use("/api/auth", authRoutes);
@@ -36,8 +46,7 @@ app.use("/api/data-structures", dataStructureRoutes);
 app.use("/api/data-structure-proposals", dataStructureProposalRoutes);
 app.use("/api/contact", contactRoutes);
 
-
-// Health check endpoint for keep-alive
+// Health check endpoint
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "OK", timestamp: new Date().toISOString() });
 });
@@ -48,8 +57,6 @@ app.use(errorHandler);
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-
-  // Initialize keep-alive
   const keepAlive = new KeepAlive();
   setTimeout(() => keepAlive.start(), 10000);
 });
